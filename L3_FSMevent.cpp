@@ -18,7 +18,7 @@ void L3_event_clearAllEventFlag(void)
     eventFlag = 0;
 }
 
-int L3_event_checkEventFlag(L3_event_e event)
+int L3_event_checkEventFlag(L3_event_e event)  //if data reception event happens
 {
     return (eventFlag & (0x01 << event));
 }

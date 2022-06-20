@@ -7,10 +7,10 @@
 
 
 //FSM state -------------------------------------------------
-#define L3STATE_IDLE                0
-#define L3STATE_Signal_RX           1
-#define L3STATE_Signal_TX           2
-#define L3STATE_Compare             3
+#define L3STATE_IDLE                0       //위치등록 안된 상태에서 가만히 기다리는 state
+#define L3STATE_Wait_REP            1       //기지국에게 위치등록 reply 회신올 때까지 기다리는 state
+#define L3STATE_Camping             2       //위치등록 된 상태에서 가만히 기다리는 state
+#define L3STATE_Handover            3       //위치등록 된 상태에서 reply 기다림
 
 
 //state variables
@@ -23,8 +23,11 @@ static uint8_t wordLen=0;
 
 static uint8_t sdu[200];
 
-//PDU
-static uint8_t PDU;     //실체 생각... L2<->L3 저장해야하는 변수를 선언
+// //PDU
+// static uint8_t req_msg;
+// static uint8_t 
+// //static uint8_t pduSize;
+
 
 //serial port interface
 static Serial pc(USBTX, USBRX);
@@ -82,57 +85,136 @@ void L3_FSMrun(void)
             {
                 //Retrieving data info.
                 uint8_t* dataPtr = L3_LLI_getMsgPtr();
+                uint8_t* getWordData = L3_Msg_getWord(dataPtr);
                 uint8_t size = L3_LLI_getSize();
 
-                debug("\n -------------------------------------------------\nRCVD MSG : %s (length:%i)\n -------------------------------------------------\n", 
-                            dataPtr, size);
-                
-                pc.printf("Give a word to send : ");
-                
-                L3_event_clearEventFlag(L3_event_msgRcvd);
-            }
-            else if (L3_event_checkEventFlag(L3_event_dataToSend)) //if data needs to be sent (keyboard input)
-            {
-#ifdef ENABLE_CHANGEIDCMD
-                if (strncmp((const char*)originalWord, "changeID: ",9) == 0)
-                {
-                    uint8_t myid = originalWord[9] - '0';
-                    debug("[L3] requesting to change to srce id %i\n", myid);
-                    L3_LLI_configReqFunc(L2L3_CFGTYPE_SRCID, myid);
-                }
-                else
-#endif
-        //1. event a-1
-        if (L3_timer_getTimerStatus() == 0){
-            //A기지국으로부터 PDU 수신
-        main_state = L3STATE_Signal_RX;    //L3STATE_IDLE -> L3STATE_Signal_RX 
-
-        }
-        else if (//PDU 안 들어옴)   // event b-1 A기지국으로부터 PDU 수신 못함
-        
-        main_state = L3STATE_Signal_RX;    //L3STATE_Signal_RX 머무름
-
-        else if (//PDU 들어옴)      //event c-1 A기지국으로부 PDU 수신 성공
-        main_state = L3STATE_Signal_TX;     //L3STATE_Signal_RX -> L3STATE_Signal_TX
-
-
-                {
-                    //msg header setting
-                    strcpy((char*)sdu, (char*)originalWord);
+                //event A-1: Brd msg 수신 -> wait reply state 이동, request msg 송신  TX timer start           
+                if (L3_Msg_checkIfBrd(dataPtr)) 
+                {   
+                    
+                    //Req msg 송신(PDU)
+                    strcpy((char*)sdu), (char*)originalWord;
                     L3_LLI_dataReqFunc(sdu, wordLen);
 
-                    debug_if(DBGMSG_L3, "[L3] sending msg....\n");
+                    L3_timer_TX_startTimer();
+
+                    main_state = L3STATE_Wait_REP;
+                    wordLen = 0;
+
                 }
-                
-                wordLen = 0;
 
-                pc.printf("Give a word to send : ");
-
-                L3_event_clearEventFlag(L3_event_dataToSend);
             }
-            break;
+            else{
+                wordLen = 0;
+                L3_timer_TX_stopTimer();
+                L3_event_clearEventFlag(L3_event_dataToSend);
+                main_state = L3STATE_IDLE;
+            }
 
-        default :
-            break;
-    }
-}
+        break;
+        
+
+        case L3STATE_Wait_REP:
+
+            if (L3_event_checkEventFlag(L3_event_msgRcvd))
+            {
+                uint8_t* dataPtr = L3_LLI_getMsgPtr();
+                uint8_t* getWordData = L3_Msg_getWord(dataPtr);
+                uint8_t size = L3_LLI_getSize();
+
+                //event A: Brd msg 수신
+
+                if(L3_Msg_checkIfBrd(dataPtr))
+                {
+
+                        main_state = L3STATE_IDLE;
+                    }
+                
+
+
+                //event B: rep msg 수신     ->  위치등록 메시지 출력    TX timer stop, Brd timer start
+                else if(L3_Msg_checkIfRep(dataPtr))
+                {
+
+                    pc.printf("\n -----------------------------------\n Now the device is near %s base station! \n -----------------------------------\n", getWordData)
+                    L3_timer_TX_stopTimer();
+                    L3_timer_Brd_startTimer();
+
+
+                    main_state = L3STATE_Camping;
+                }
+
+
+                //event C: Tx timer timeout    
+                else if (L3_event_checkEventFlag(L3_event_TXTimeout))
+                {
+                    pc.printf("\n -----------------------------------\n TX time is over \n -----------------------------------\n")
+                    L3_event_clearEventFlag(L3_event_TXTimeout);
+                    main_state = L3STATE_IDLE;
+                }
+
+            }
+
+
+        break;
+
+        case L3STATE_Camping:
+            if (L3_event_checkEventFlag(L3_event_msgRcvd))
+            {   
+                //event A-1     --> Brd timer start
+                if(L3_Msg_checkIfBrd(dataPtr))
+                    
+                    
+                    L3_timer_Brd_startTimer();
+
+                    main_state = L3STATE_Camping;
+                }
+
+                //event A-2
+                else if(L3_Msg_checkIfBrdNEI(dataPtr))
+                {
+                    //if (신호 약하면)  ->  Camping State 머무름
+                    main_state = L3STATE_Camping;
+
+
+                    //if (신호 강하면)  ->  request msg 송신, TX timer 시작, Handover State 이동
+                    //req msg 송신
+                    strcpy((char*)sdu), (char*)originalWord;
+                    L3_LLI_dataReqFunc(sdu, wordLen);
+
+                    L3_timer_TX_startTimer();
+                    main_state = L3STATE_Handover;
+                }
+
+                //event D: Brd timer time out   ->  IDLE State 이동
+                else if (L3_event_checkEventFlag(L3_event_BrdTimeout))
+                {
+                    pc.printf("\n -----------------------------------\n Brd time is over \n -----------------------------------\n")
+                    L3_event_clearEventFlag(L3_event_BrdTimeout);
+                    main_state = L3STATE_IDLE;
+                }
+            
+        break;
+
+        case L3STATE_Handover:
+            //event C: TX timer time out    ->  camping state로 이동
+            if (L3_event_checkEventFlag(L3_event_TXTimeout))
+            {
+                pc.printf("\n -----------------------------------\n TX time is over \n -----------------------------------\n");
+                L3_event_clearEventFlag(L3_event_TXTimeout);
+                main_state = L3STATE_Camping;
+            }
+            
+            //event B: reply msg 수신   ->  serving cell 변경, TX timer stop, Brd timer start, Camping State로 이동
+            else if (L3_Msg_checkIfRep(dataPtr))
+            {
+                //serving cell 변경 -> 출력
+                pc.printf("\n -----------------------------------\n Now the device is near %s base station! \n -----------------------------------\n", getWordData);
+                //어떻게 변경하냐...
+
+                L3_timer_TX_stopTimer();
+                L3_timer_Brd_startTimer();
+                main_state = L3STATE_Camping;
+            }
+
+        break;
